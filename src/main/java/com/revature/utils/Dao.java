@@ -15,20 +15,52 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
 public class Dao<T> {
 
+
+    /**
+     * Logger
+     */
     private static Logger logger = Logger.getLogger(Dao.class);
 
+    /**
+     * Holds the Class Type of the dao object
+     */
     private Class<?> daoClass;
+    /**
+     * Holds the table name
+     */
     private String tableName;
+    /**
+     * Holds the column names for the table
+     */
     private List<String> columnNames = new ArrayList<>();
+    /**
+     * Holds the field names of the class the dao is holding
+     */
     private List<String> fieldNames = new ArrayList<>();
+    /**
+     * Holds the sql data types for each column
+     */
     private List<String> columnTypes = new ArrayList<>();
+    /**
+     * Holds the constraints that are created for the table
+     */
     private List<String> constraints = new ArrayList<>();
 
+
+    /**
+     * Dao constructor
+     * Gets table name from Entity Annotation on the model
+     * Dao class is taken from teh class that is passed into the constructor
+     * Iterates through each field to check for annotations and parses accordingly
+     * ArrayLists of columns and column types are filled and each column index in the columnName list matches the index of its type in the columnType List
+     * @param clazz Class Type of the Dao
+     */
     public Dao(Class<?> clazz) {
         tableName = getTableName(clazz);
         daoClass = clazz;
@@ -60,7 +92,12 @@ public class Dao<T> {
         }
     }
 
-    public boolean createTable(ConnectionSource connectionSource) {
+    /**
+     * Creates a table based on the model passed into the dao instance
+     * @param connectionSource instance of the database connection
+     * @return returns true if a table was created; false otherwise
+     */
+    private boolean createTable(ConnectionSource connectionSource) {
         StringBuilder tableStatements = new StringBuilder();
         tableStatements.append("id SERIAL PRIMARY KEY, ");
         for(int i = 0; i < columnNames.size(); i++) {
@@ -83,7 +120,14 @@ public class Dao<T> {
         return false;
     }
 
+    /**
+     * Inserts a new row into the table
+     * @param connectionSource instance of the database connection
+     * @param object Instance of the class the dao instance is holding
+     * @return returns the object that has been inserted into the DB
+     */
     public T insert(ConnectionSource connectionSource, T object) {
+        createTable(connectionSource);
         Object fieldValue = null;
         List<String> psConditions = new ArrayList<>();
         for (int i = 0; i < columnNames.size(); i++) {
@@ -121,6 +165,12 @@ public class Dao<T> {
         return (T) object;
     }
 
+    /**
+     * Selects an object by its ID
+     * @param connectionSource instance of the database connection
+     * @param id id number of the object being retrieved
+     * @return object with the given id
+     */
     public T getById(ConnectionSource connectionSource, int id) {
         Object object = null;
         String sql = "SELECT * FROM " + tableName + " WHERE id = " + id;
@@ -158,6 +208,11 @@ public class Dao<T> {
         return null;
     }
 
+    /**
+     * Retrieves the most recently created object from the table
+     * @param connectionSource instance of the database connection
+     * @return the last row of the table as an object
+     */
     public T getLastRecordOf(ConnectionSource connectionSource) {
         Object object = null;
         String sql = "SELECT * FROM " + tableName + " ORDER BY id DESC LIMIT 1;";
@@ -195,18 +250,39 @@ public class Dao<T> {
         return null;
     }
 
+    /**
+     * Gets all rows from the table
+     * @param connectionSource instance of the database connection
+     * @return List of objects based on the table rows
+     */
     public ArrayList<T> getAll(ConnectionSource connectionSource) {
         ArrayList<T> allElements = new ArrayList<>();
         String sql = "SELECT * FROM " + tableName;
         try(Connection conn = connectionSource.connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
             ResultSet rs = ps.executeQuery();
             List<Method> setters = getSetters(daoClass);
+            List<Field> fields = new ArrayList<>();
+            fields.add(BaseClass.class.getDeclaredFields()[0]);
+            Field[] fs = daoClass.getDeclaredFields();
+            Collections.addAll(fields, fs);
             while(rs.next()) {
                 Object object = daoClass.newInstance();
                 int index = 1;
-                for(int i = 0; i < setters.size(); i++) {
-                    setters.get(i).invoke(object, rs.getObject(index));
-                    index++;
+                for(int i = 0; i < fields.size(); i++) {
+                    if(fields.get(i).getAnnotations().length > 0 && fields.get(i).getAnnotations()[0] instanceof ForeignKey) {
+                        ForeignKey fk = (ForeignKey) fields.get(i).getAnnotations()[0];
+                        int reference = rs.getInt(index);
+                        for(int j = 0; j < DaoManager.getDaoList().size(); j++) {
+                            if(DaoManager.getDaoList().get(j).getDaoClass().equals(fk.refClass())) {
+                                Object refObject = DaoManager.getDaoList().get(j).getById(connectionSource, reference);
+                                setters.get(i).invoke(object, refObject);
+                                index++;
+                            }
+                        }
+                    } else {
+                        setters.get(i).invoke(object, rs.getObject(index));
+                        index++;
+                    }
                 }
                 allElements.add((T) object);
             }
@@ -217,9 +293,16 @@ public class Dao<T> {
         return allElements;
     }
 
+    /**
+     * Updates a row by passing in the id and the updated object
+     * @param connectionSource instance of the database connection
+     * @param id primary key
+     * @param obj updated object
+     * @return the newly updated object
+     */
     public T updateById(ConnectionSource connectionSource, int id, T obj) {
         List<Method> getters = getGetters(daoClass);
-        List<String> updates = new ArrayList<>();
+        List<Object> updates = new ArrayList<>();
         Field[] fields = daoClass.getDeclaredFields();
         for(Field field: fields) {
             for(Method m: getters) {
@@ -229,20 +312,32 @@ public class Dao<T> {
                         try {
                             field.setAccessible(true);
                             Object refObject = field.get(obj);
-                            Field refField = refObject.getClass().getSuperclass().getDeclaredField("id");
-                            refField.setAccessible(true);
-                            int refId = (Integer) refField.get(refObject);
-                            String s = String.valueOf(refId);
-                            s = "'" + s + "'";
-                            updates.add(s);
-                        } catch (IllegalAccessException | NoSuchFieldException e) {
+                            Method method = refObject.getClass().getMethod("getId");
+                            int refId = (int) method.invoke(refObject);
+                            updates.add(refId);
+                        } catch (IllegalAccessException | NoSuchMethodException | InvocationTargetException e) {
                             e.printStackTrace();
                         }
                     } else {
                         try {
-                            String s = (String) m.invoke(obj);
-                            s = "'" + s + "'";
-                            updates.add(s);
+                            Class<?> returnType = m.getReturnType();
+                            if(returnType.equals(java.lang.String.class)) {
+                                String s = (String) m.invoke(obj);
+                                s = "'" + s + "'";
+                                updates.add(s);
+                            } else if (returnType.equals(boolean.class)) {
+                                boolean b = (boolean) m.invoke(obj);
+                                updates.add(b);
+                            } else if (returnType.equals(int.class)) {
+                                int num = (int) m.invoke(obj);
+                                updates.add(num);
+                            } else if (returnType.equals(long.class)) {
+                                long bigNum = (long) m.invoke(obj);
+                                updates.add(bigNum);
+                            } else if (returnType.equals(char.class)) {
+                                char c = (char) m.invoke(obj);
+                                updates.add(c);
+                            }
                         } catch (IllegalAccessException | InvocationTargetException e) {
                             e.printStackTrace();
                         }
@@ -250,8 +345,11 @@ public class Dao<T> {
                 }
             }
         }
+
+        String updateStatement = Arrays.toString(updates.toArray()).replace("[", "").replace("]", "");
+
         String sql = "UPDATE " + tableName + " SET (" + String.join(", ", columnNames) + ") = (" +
-                String.join(", ", updates) + ") WHERE id = " + id;
+                updateStatement + ") WHERE id = " + id;
         try(Connection conn = connectionSource.connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.executeUpdate();
             obj = getById(connectionSource, id);
@@ -262,27 +360,53 @@ public class Dao<T> {
         return obj;
     }
 
+    /**
+     * Deletes an object with the given id
+     * @param connectionSource instance of the database connection
+     * @param id primary key
+     * @return true if successfully deleted; false otherwise
+     */
     public boolean deleteById(ConnectionSource connectionSource, int id) {
+        int rowsDeleted = 0;
         String sql = "DELETE FROM " + tableName + " WHERE id = " + id;
         try(Connection conn = connectionSource.connect(); PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.execute();
-            return true;
+            rowsDeleted = ps.executeUpdate();
+            if(rowsDeleted > 0) {
+                return true;
+            } else {
+                return false;
+            }
         } catch (SQLException throwables) {
             logger.error("Could not delete record", throwables);
         }
         return false;
     }
 
+    /**
+     * Gets the annotation from the field
+     * @param field Field whose annotation will be returned
+     * @return the annotation of the field
+     */
     private Annotation getFieldAnnotation(Field field) {
         Annotation[] annotations = field.getAnnotations();
         return annotations[0];
     }
 
+    /**
+     * Gets the annotation from the class
+     * @param clazz Class whose annotation will be returned
+     * @return the annotation of the Class
+     */
     private Annotation getClassAnnotation(Class<?> clazz) {
         Annotation[] annotations = clazz.getAnnotations();
         return annotations[0];
     }
 
+    /**
+     * Returns table name
+     * @param clazz Class the dao is holding
+     * @return String table name
+     */
     private String getTableName(Class<?> clazz) {
         Annotation annotation = getClassAnnotation(clazz);
         if(annotation instanceof Entity) {
@@ -292,10 +416,20 @@ public class Dao<T> {
         return "";
     }
 
+    /**
+     * Gets fields from the class
+     * @param clazz class the dao is holding
+     * @return all declared fields
+     */
     private Field[] getClassFields(Class<?> clazz) {
         return clazz.getDeclaredFields();
     }
 
+    /**
+     * gets the name of the primary column
+     * @param clazz class the dao is holding
+     * @return String name of the primary column
+     */
     private String getPrimaryColName (Class<?> clazz) {
         Field[] fields = clazz.getDeclaredFields();
         for(Field field: fields) {
@@ -308,6 +442,11 @@ public class Dao<T> {
         return "";
     }
 
+    /**
+     * Takes in a field and converts its type to its SQL datatype equivalent
+     * @param field field whose datatype needs to be parsed
+     * @return String of the SQL datatype name
+     */
     private String getSqlType(Field field) {
         String type = field.getGenericType().getTypeName().toLowerCase();
         if(type.equals("byte") || type.equals("short")) {
@@ -323,6 +462,11 @@ public class Dao<T> {
         }
     }
 
+    /**
+     * Gets all getter methods of a class
+     * @param clazz class the dao is holding
+     * @return List of all class getter methods
+     */
     private List<Method> getGetters(Class<?> clazz) {
         List<Method> getters = new ArrayList<>();
         Method[] superMethods = clazz.getSuperclass().getDeclaredMethods();
@@ -343,16 +487,24 @@ public class Dao<T> {
         return getters;
     }
 
+    /**
+     * Get's the class the dao is holding
+     * @return class the doa is holding
+     */
     public Class<?> getDaoClass() {
         return daoClass;
     }
 
+    /**
+     * Gets all setter methods on a class
+     * @param clazz class the dao is holding
+     * @return all class setter methods
+     */
     private List<Method> getSetters(Class<?> clazz) {
         List<Method> setters = new ArrayList<>();
         Method[] superMethods = clazz.getSuperclass().getDeclaredMethods();
         for(Method m:superMethods) {
             if(m.getName().contains("set")) {
-                System.out.println(m.getName());
                 setters.add(m);
             }
         }
@@ -361,7 +513,6 @@ public class Dao<T> {
             Method[] methods = clazz.getDeclaredMethods();
             for(Method method:methods) {
                 if(method.getName().toLowerCase().contains("set" + field.getName().toLowerCase()) && method.getName().toLowerCase().contains(field.getName().toLowerCase())) {
-                    System.out.println(method.getName());
                     setters.add(method);
                 }
             }
@@ -369,18 +520,34 @@ public class Dao<T> {
         return setters;
     }
 
+    /**
+     * Gets table name
+     * @return table name
+     */
     public String getTableName() {
         return tableName;
     }
 
+    /**
+     * Gets column names
+     * @return list of column names
+     */
     public List<String> getColumnNames() {
         return columnNames;
     }
 
+    /**
+     * gets column types
+     * @return list of column types
+     */
     public List<String> getColumnTypes() {
         return columnTypes;
     }
 
+    /**
+     * gets constraints
+     * @return list of constraints
+     */
     public List<String> getConstraints() {
         return constraints;
     }

@@ -8,5 +8,9 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 @Target(ElementType.FIELD)
 public @interface Primary {
+    /**
+     * Primary column name
+     * @return
+     */
     String columnName();
 }
