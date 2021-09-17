@@ -27,7 +27,7 @@ Create a new Maven project and include ORMate as a dependency in your pom.xml fi
 All models should extend the `BaseClass` from ORMate.
 
 ```
-public class myModel extends BaseClass
+public class myModel extends BaseClass {}
 ```
 
 Give your Model classes the class Level annotation `@Entity` which accepts an argument tableName: 
